@@ -1,0 +1,490 @@
+<!--- templates/index.html --->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AeroDSL</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <style>
+        body {
+            font-family: Inter, system-ui, sans-serif;
+            margin: 0;
+            background: #f8fafc;
+            color: #111827;
+        }
+
+        header {
+            padding: 20px 40px;
+            background: white;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+            padding: 30px 40px;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+        }
+
+        h2 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+
+        input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border: 1px solid #d1d5db;
+            font-family: monospace;
+        }
+
+        button {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: none;
+            background: #111827;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:hover {
+            opacity: 0.85;
+        }
+
+        .autocomplete-box {
+            border: 1px solid #e5e7eb;
+            background: white;
+            position: absolute;
+            z-index: 100;
+        }
+
+        .autocomplete-item {
+            padding: 6px;
+            cursor: pointer;
+        }
+
+        .autocomplete-item:hover {
+            background: #f3f4f6;
+        }
+
+        .preview-block {
+            margin-bottom: 8px;
+        }
+
+        .compressed {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f3f4f6;
+            border-radius: 6px;
+            font-family: monospace;
+        }
+        .error {
+            color: #dc2626;
+            font-weight: 600;
+        }
+
+        .valid {
+            color: #111827;
+        }
+
+        .missing {
+            color: #9ca3af;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    AeroDSL – Visual Abstraction Layer for GDS Commands
+</header>
+
+<div class="container">
+
+    <!-- Builder Panel -->
+    <div class="card">
+        <h2>Availability Builder</h2>
+
+        <div id="builder-form">
+            <label>Date</label>
+            <input name="date">
+
+            <label>Origin</label>
+            <input name="origin" id="origin-input" autocomplete="off">
+            <div id="origin-results" class="autocomplete-box"></div>
+
+            <label>Destination</label>
+            <input name="destination" id="destination-input" autocomplete="off">
+            <div id="destination-results" class="autocomplete-box"></div>
+
+            <button type="button" id="builder-btn">Generate</button>
+        </div>
+
+    </div>
+
+    <!-- DSL Editor -->
+    <div class="card">
+        <h2>DSL Editor</h2>
+        <input id="dsl-input" placeholder="AN 20DEC KUL SIN">
+        <div id="dsl-suggestions" class="autocomplete-box"></div>
+    </div>
+
+    <!-- Live Preview -->
+    <div class="card">
+        <h2>Live Structured Preview</h2>
+        <div id="dsl-preview"></div>
+    </div>
+
+</div>
+
+<div id="map" style="height:300px;margin-top:15px;border-radius:8px;"></div>
+
+<script>
+
+
+let map;
+let routeLine;
+let originMarker;
+let destinationMarker;
+
+function renderMap(origin, destination) {
+
+    if (!map) {
+        map = L.map('map').setView([0, 0], 2);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+    }
+
+    if (routeLine) map.removeLayer(routeLine);
+    if (originMarker) map.removeLayer(originMarker);
+    if (destinationMarker) map.removeLayer(destinationMarker);
+
+    const originLatLng = [parseFloat(origin.lat), parseFloat(origin.lon)];
+    const destLatLng = [parseFloat(destination.lat), parseFloat(destination.lon)];
+
+    originMarker = L.marker(originLatLng).addTo(map);
+    destinationMarker = L.marker(destLatLng).addTo(map);
+
+    routeLine = L.polyline([originLatLng, destLatLng], {
+        color: 'blue',
+        weight: 3
+    }).addTo(map);
+
+    map.fitBounds(routeLine.getBounds());
+    setTimeout(() => map.invalidateSize(), 100);
+
+    animateFlight();
+}
+
+async function setupAutocomplete(inputId, resultId) {
+    const input = document.getElementById(inputId);
+    const resultBox = document.getElementById(resultId);
+
+    input.addEventListener("input", async () => {
+        const query = input.value;
+        if (query.length < 2) {
+            resultBox.innerHTML = "";
+            return;
+        }
+
+        const response = await fetch(`/search?q=${query}`);
+        const data = await response.json();
+
+        resultBox.innerHTML = "";
+
+        data.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "autocomplete-item";
+            div.innerText = `${item.city} (${item.iata})`;
+            div.onclick = () => {
+                input.value = item.city;
+                resultBox.innerHTML = "";
+            };
+            resultBox.appendChild(div);
+        });
+    });
+}
+
+function estimateFlightTime(distanceKm) {
+    const cruiseSpeed = 850; // km/h
+    const bufferHours = 0.5; // taxi + climb + descent
+    const hours = distanceKm / cruiseSpeed + bufferHours;
+
+    const totalMinutes = Math.round(hours * 60);
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+
+    return `${h}h ${m}m`;
+}
+
+setupAutocomplete("origin-input", "origin-results");
+setupAutocomplete("destination-input", "destination-results");
+
+const dslInput = document.getElementById("dsl-input");
+const suggestionBox = document.getElementById("dsl-suggestions");
+const previewBox = document.getElementById("dsl-preview");
+
+dslInput.addEventListener("input", async () => {
+    const value = dslInput.value.trim().toUpperCase();
+    const tokens = value.split(/\s+/);
+
+    renderPreview(tokens);
+
+    const cursorPos = dslInput.selectionStart;
+    const beforeCursor = value.slice(0, cursorPos);
+    const tokenIndex = beforeCursor.split(/\s+/).length - 1;
+
+    const currentToken = tokens[tokenIndex] || "";
+
+    if ((tokenIndex === 2 || tokenIndex === 3) && currentToken.length >= 2) {
+        const response = await fetch(`/search?q=${currentToken}`);
+        const results = await response.json();
+
+        suggestionBox.innerHTML = "";
+
+        results.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "autocomplete-item";
+            div.innerText = `${item.city} (${item.iata})`;
+
+            div.onclick = () => {
+                tokens[tokenIndex] = item.iata;
+                dslInput.value = tokens.join(" ");
+                suggestionBox.innerHTML = "";
+                renderPreview(tokens);
+            };
+
+            suggestionBox.appendChild(div);
+        });
+    } else {
+        suggestionBox.innerHTML = "";
+    }
+});
+
+async function renderPreview(tokens) {
+    let html = "";
+
+    // 1️⃣ Intent 
+    if (!tokens[0]) {
+        html += `<div class="missing">Intent: Missing</div>`;
+    } else if (tokens[0] !== "AN") {
+        html += `<div class="error">Intent: Invalid (${tokens[0]})</div>`;
+    } else {
+        html += `<div class="valid"><strong>Intent:</strong> Availability</div>`;
+    }
+
+    // 2️⃣ Date (DDMMM)
+    if (!tokens[1]) {
+        html += `<div class="missing">Date: Missing</div>`;
+    } else if (!/^\d{2}[A-Z]{3}$/.test(tokens[1])) {
+        html += `<div class="error">Date: Invalid format</div>`;
+    } else {
+        html += `<div class="valid"><strong>Date:</strong> ${tokens[1]}</div>`;
+    }
+
+    // 3️⃣ Origin validate
+    html += `<div id="origin-preview"></div>`;
+
+    // 4️⃣ Destination validate
+    html += `<div id="destination-preview"></div>`;
+
+    // Compressed
+    if (tokens.length >= 4) {
+        const compressed = tokens.join("");
+        html += `<div class="compressed"><strong>Compressed:</strong> ${compressed}</div>`;
+    }
+
+    previewBox.innerHTML = html;
+
+    // === IATA validation ===
+
+    let originData = null;
+    let destinationData = null;
+
+    // Origin
+    if (!tokens[2]) {
+        document.getElementById("origin-preview").innerHTML =
+            `<div class="missing">Origin: Missing</div>`;
+    } else {
+        const res = await fetch(`/resolve/${tokens[2]}`);
+        const data = await res.json();
+
+        if (!data) {
+            document.getElementById("origin-preview").innerHTML =
+                `<div class="error">Origin: Invalid (${tokens[2]})</div>`;
+        } else {
+            originData = data;
+            document.getElementById("origin-preview").innerHTML =
+                `<div class="valid"><strong>Origin:</strong> ${data.name} (${data.iata})</div>`;
+        }
+    }
+
+    // Destination
+    if (!tokens[3]) {
+        document.getElementById("destination-preview").innerHTML =
+            `<div class="missing">Destination: Missing</div>`;
+    } else {
+        const res = await fetch(`/resolve/${tokens[3]}`);
+        const data = await res.json();
+
+        if (!data) {
+            document.getElementById("destination-preview").innerHTML =
+                `<div class="error">Destination: Invalid (${tokens[3]})</div>`;
+        } else {
+            destinationData = data;
+            document.getElementById("destination-preview").innerHTML =
+                `<div class="valid"><strong>Destination:</strong> ${data.name} (${data.iata})</div>`;
+        }
+    }
+
+    if (originData && destinationData) {
+
+        renderMap(originData, destinationData);
+
+        const distance = calculateDistance(
+            parseFloat(originData.lat),
+            parseFloat(originData.lon),
+            parseFloat(destinationData.lat),
+            parseFloat(destinationData.lon)
+        );
+
+        previewBox.innerHTML += 
+            `<div class="preview-block"><strong>Distance:</strong> ${distance} km</div>`;
+
+        const flightTime = estimateFlightTime(distance);
+
+        previewBox.innerHTML += 
+            `<div class="preview-block"><strong>Estimated Flight Time:</strong> ${flightTime}</div>`;
+
+
+        const originTime = getLocalTime(originData.tz);
+        const destTime = getLocalTime(destinationData.tz);
+
+        previewBox.innerHTML += 
+            `<div class="preview-block">
+                <strong>Departure Local Time:</strong> ${originTime} (${originData.tz})
+            </div>`;
+
+        previewBox.innerHTML += 
+            `<div class="preview-block">
+                <strong>Arrival Local Time:</strong> ${destTime} (${destinationData.tz})
+            </div>`;
+    }
+
+    
+}
+
+let planeMarker;
+let flightInterval;
+
+function animateFlight() {
+
+    if (flightInterval) clearInterval(flightInterval);
+    if (planeMarker) map.removeLayer(planeMarker);
+
+    const latlngs = routeLine.getLatLngs();
+
+    let progress = 0;
+
+    planeMarker = L.circleMarker(latlngs[0], {
+        radius: 6,
+        color: "red",
+        fillColor: "red",
+        fillOpacity: 1
+    }).addTo(map);
+
+    flightInterval = setInterval(() => {
+
+        progress += 0.01;
+        if (progress >= 1) progress = 0;
+
+        const lat = latlngs[0].lat + (latlngs[1].lat - latlngs[0].lat) * progress;
+        const lng = latlngs[0].lng + (latlngs[1].lng - latlngs[0].lng) * progress;
+
+        planeMarker.setLatLng([lat, lng]);
+
+    }, 30);
+}
+
+
+
+function getLocalTime(tz) {
+    return new Date().toLocaleString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: tz
+    });
+}
+
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2-lat1) * Math.PI/180;
+    const dLon = (lon2-lon1) * Math.PI/180;
+
+    const a =
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(lat1*Math.PI/180) *
+        Math.cos(lat2*Math.PI/180) *
+        Math.sin(dLon/2) *
+        Math.sin(dLon/2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return (R * c).toFixed(0);
+}
+
+
+function renderBuilderPreview(data) {
+    let html = "";
+
+    html += `<div class="preview-block"><strong>Intent:</strong> ${data.intent}</div>`;
+    html += `<div class="preview-block"><strong>Date:</strong> ${data.date}</div>`;
+    html += `<div class="preview-block"><strong>Origin:</strong> ${data.origin.city} (${data.origin.iata})</div>`;
+    html += `<div class="preview-block"><strong>Destination:</strong> ${data.destination.city} (${data.destination.iata})</div>`;
+
+    html += `<div class="compressed"><strong>Compressed:</strong> ${data.compressed}</div>`;
+
+    previewBox.innerHTML = html;
+}
+
+const builderBtn = document.getElementById("builder-btn");
+
+builderBtn.addEventListener("click", async () => {
+
+    const date = document.querySelector("input[name='date']").value;
+    const origin = document.querySelector("input[name='origin']").value;
+    const destination = document.querySelector("input[name='destination']").value;
+
+    const formData = new FormData();
+    formData.append("date", date);
+    formData.append("origin", origin);
+    formData.append("destination", destination);
+
+    const response = await fetch("/generate", {
+        method: "POST",
+        body: formData
+    });
+
+    const data = await response.json();
+
+    renderBuilderPreview(data);
+});
+</script>
+
+</body>
+</html>
